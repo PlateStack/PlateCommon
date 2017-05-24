@@ -105,7 +105,7 @@ interface TextConverter {
     }
 
     fun ShowText.toJson(json: JsonObject) {
-        json["value"] = text.toJson()
+        json["value"] = text.toJson(JsonObject())
     }
 
     fun ShowItem.toJson(json: JsonObject) {
