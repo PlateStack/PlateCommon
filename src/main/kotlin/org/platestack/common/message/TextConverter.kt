@@ -29,7 +29,7 @@ import org.platestack.api.message.Text
 import org.platestack.api.message.Text.*
 
 interface TextConverter {
-    fun Text.toJson(json: JsonObject = JsonObject()): JsonObject = json.also {
+    fun Text.toJson(json: JsonObject = JsonObject()): JsonObject = json.also { _ ->
         style.color?.let { json["color"] = it.id }
         style.formatMap.forEach { format, value -> json[format.id] = value }
         insertion?.let { json["insertion"] = it }
@@ -94,7 +94,7 @@ interface TextConverter {
         json["selector"] = selector.toJson()
     }
 
-    fun HoverEvent.toJson(json: JsonObject = JsonObject()): JsonObject = json.also {
+    fun HoverEvent.toJson(json: JsonObject = JsonObject()): JsonObject = json.also { _ ->
         json["action"] = action
         when(this) {
             is ShowText -> toJson(json)
@@ -120,7 +120,7 @@ interface TextConverter {
         json["value"] = WrappedJsonElement(serializedEntity)
     }
 
-    fun ClickEvent.toJson(json: JsonObject = JsonObject()) = json.also {
+    fun ClickEvent.toJson(json: JsonObject = JsonObject()) = json.also { _ ->
         json["action"] = action
         json["value"] = value.toJson()
     }
