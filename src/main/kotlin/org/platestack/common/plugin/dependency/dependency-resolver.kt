@@ -27,7 +27,6 @@ import java.util.*
 import java.util.stream.Collectors
 import kotlin.Comparator
 
-private data class Node(val meta: PlateMetadata, val relative: ID, val relation: Relation, var match: Version? = null)
 private data class ID(val namespace: String, val plugin: String): Comparable<ID> {
     constructor(meta: PlateMetadata): this("plate", meta.id)
     constructor(relation: Relation): this(relation.namespace, relation.id)
@@ -97,83 +96,11 @@ private fun resolveOrder(elements: Collection<PlateMetadata>): List<PlateMetadat
     return sorted.map(Entry::meta)
 }
 
-private data class KeyPoint<E>(val vertex: Vertex<E>)
-
-private data class Vertex<E>(val value: E, val link: KeyPoint<E>? = null) {
-    val before = KeyPoint(this)
-    val after = KeyPoint(this)
-}
-
-class MetaCollection(vararg elements: PlateMetadata): AbstractMutableCollection<PlateMetadata>() {
-    private val lists = mutableListOf(mutableListOf<PlateMetadata>())
-    init {
-        elements.firstOrNull()?.let { add(it) }
-    }
-
-    override fun add(element: PlateMetadata) = addAll(setOf(element))
-
-    override fun addAll(elements: Collection<PlateMetadata>): Boolean {
-        if(elements.isEmpty())
-            return false
-
-        val pending = elements.toList()
-
-        val byId = pending.associateTo(mutableMapOf()) { ID(it) to it }
-        var last: Map<ID, PlateMetadata>? = null
-        while (byId.isNotEmpty()) {
-            if(byId == last)
-                error("Unable to resolve the dependency order of: ${byId.keys}\nPending metadata: ${byId.values}")
-
-            val iter = byId.iterator()
-            while (iter.hasNext()) {
-                val entry = iter.next()
-                if(entry.value.relations.none { it.namespace == "plate" && ID(it) in byId }) {
-                    if(entry.value.relations.none { rel-> rel.namespace == "plate" && lists.any { it.any { meta-> meta.name == rel.id } } }) {
-                        lists += mutableListOf(entry.value)
-                        iter.remove()
-                        continue
-                    }
-                }
-            }
-        }
-
-        TODO()
-    }
-
-    override fun remove(element: PlateMetadata): Boolean {
-        TODO()
-    }
-
-    override val size get() = lists.sumBy { it.size }
-    override fun iterator() = object : MutableIterator<PlateMetadata> {
-        private val reference = lists.asSequence().flatMap { it.asSequence() }.iterator()
-        private var last: PlateMetadata? = null
-
-        override fun hasNext() = reference.hasNext()
-        override fun next(): PlateMetadata {
-            val next = reference.next()
-            last = next
-            return next
-        }
-
-        override fun remove() {
-            remove(requireNotNull(last))
-        }
-    }
-}
-
 class DependencyResolution(vararg plugin: PlateMetadata) {
     val missingRequired: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
     val missingOptional: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
     val conflicts: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
     val established: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
-
-    fun order() {
-        val associate = established.entries.associate { it.key to it.value.map { rel-> Vertex(it.key to rel) } }
-        TODO()
-    }
-
-    fun createList() = resolveOrder(PlateNamespace.loadedPlugins.map(PlatePlugin::metadata) + established.keys)
 
     init {
         val nodes = plugin.flatMap { meta -> meta.relations.map { Node(meta, ID(it), it) } }
@@ -197,6 +124,10 @@ class DependencyResolution(vararg plugin: PlateMetadata) {
         @JvmStatic private val optional = EnumSet.of(RelationType.OPTIONAL_BEFORE, RelationType.OPTIONAL_AFTER)
         @JvmStatic private val conflict = EnumSet.of(RelationType.INCOMPATIBLE, RelationType.INCLUDED)
     }
+
+    fun createList() = resolveOrder(PlateNamespace.loadedPlugins.map(PlatePlugin::metadata) + established.keys)
+
+    private data class Node(val meta: PlateMetadata, val relative: ID, val relation: Relation, var match: Version? = null)
 
     private fun List<Node>.filterImmutable(predicate: (Node)-> Boolean) =
             filter(predicate).toMap().mapValues { it.value.toImmutableSet() }.toImmutableMap()
