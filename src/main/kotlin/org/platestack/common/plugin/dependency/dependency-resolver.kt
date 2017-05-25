@@ -41,7 +41,7 @@ private data class ID(val namespace: String, val plugin: String): Comparable<ID>
 }
 
 private fun resolveOrder(elements: Collection<PlateMetadata>): List<PlateMetadata> {
-    class Entry(val meta: PlateMetadata) {
+    data class Entry(val meta: PlateMetadata) {
         val id = ID(meta)
         val needBefore = meta.relations.filter { it.type == RelationType.REQUIRED_BEFORE || it.type == RelationType.OPTIONAL_BEFORE }
         val needAfter = meta.relations.filter { it.type == RelationType.REQUIRED_AFTER || it.type == RelationType.OPTIONAL_AFTER }
@@ -101,18 +101,21 @@ class DependencyResolution(vararg plugin: PlateMetadata) {
     val missingOptional: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
     val conflicts: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
     val established: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
+    val independents: ImmutableSet<PlateMetadata>
 
     init {
+        val independents = plugin.asSequence().filter { it.relations.isEmpty() }.associate { ID(it) to it }
         val nodes = plugin.flatMap { meta -> meta.relations.map { Node(meta, ID(it), it) } }
 
         val plugins: Map<ID, Node> = nodes.stream().collect(Collectors.toMap({ ID(it.meta) }, { it }, { a, b -> error("Duplicated nodes: $a, $b") }))
         plugins.keys.find { PlateStack.getPlugin(it.plugin, it.namespace) != null }?.let { error("The plugin $it is already loaded!") }
 
         nodes.forEach { node ->
-            node.match = node.relative.let { plugins[it]?.meta?.version ?: PlateStack.getPlugin(it.plugin, it.namespace)?.version }
+            node.match = node.relative.let { (plugins[it]?.meta ?: independents[it])?.version ?: PlateStack.getPlugin(it.plugin, it.namespace)?.version }
                     ?.takeIf { node.relation.versions.any { range -> it in range } }
         }
 
+        this.independents = independents.values.toImmutableSet()
         missingRequired = nodes.filterImmutable { it.match == null && it.relation.type in required }
         missingOptional = nodes.filterImmutable { it.match == null && it.relation.type in optional }
         conflicts = nodes.filterImmutable { it.match != null && it.relation.type in conflict }
@@ -125,7 +128,7 @@ class DependencyResolution(vararg plugin: PlateMetadata) {
         @JvmStatic private val conflict = EnumSet.of(RelationType.INCOMPATIBLE, RelationType.INCLUDED)
     }
 
-    fun createList() = resolveOrder(PlateNamespace.loadedPlugins.map(PlatePlugin::metadata) + established.keys)
+    fun createList() = resolveOrder(PlateNamespace.loadedPlugins.map(PlatePlugin::metadata) + established.keys + independents)
 
     private data class Node(val meta: PlateMetadata, val relative: ID, val relation: Relation, var match: Version? = null)
 
