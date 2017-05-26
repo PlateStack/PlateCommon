@@ -19,10 +19,10 @@ package org.platestack.common.plugin.dependency
 import org.platestack.api.plugin.*
 import org.platestack.api.plugin.version.Version
 import org.platestack.api.server.PlateStack
-import org.platestack.api.structure.ImmutableMap
-import org.platestack.api.structure.ImmutableSet
-import org.platestack.api.structure.toImmutableMap
-import org.platestack.api.structure.toImmutableSet
+import org.platestack.structure.immutable.ImmutableMap
+import org.platestack.structure.immutable.ImmutableSet
+import org.platestack.structure.immutable.toImmutableMap
+import org.platestack.structure.immutable.toImmutableSet
 import java.util.*
 import java.util.stream.Collectors
 import kotlin.Comparator
