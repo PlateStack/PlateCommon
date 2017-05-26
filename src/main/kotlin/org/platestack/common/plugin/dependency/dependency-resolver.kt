@@ -16,13 +16,13 @@
 
 package org.platestack.common.plugin.dependency
 
-import kotlinx.collections.immutable.ImmutableMap
-import kotlinx.collections.immutable.ImmutableSet
-import kotlinx.collections.immutable.toImmutableMap
-import kotlinx.collections.immutable.toImmutableSet
 import org.platestack.api.plugin.*
 import org.platestack.api.plugin.version.Version
 import org.platestack.api.server.PlateStack
+import org.platestack.api.structure.ImmutableMap
+import org.platestack.api.structure.ImmutableSet
+import org.platestack.api.structure.toImmutableMap
+import org.platestack.api.structure.toImmutableSet
 import java.util.*
 import java.util.stream.Collectors
 import kotlin.Comparator
