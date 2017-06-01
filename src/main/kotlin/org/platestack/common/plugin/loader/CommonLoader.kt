@@ -22,12 +22,17 @@ import org.platestack.api.message.Text
 import org.platestack.api.message.Translator
 import org.platestack.api.plugin.*
 import org.platestack.api.plugin.annotation.Plate
+import org.platestack.api.plugin.exception.ConflictingPluginsException
+import org.platestack.api.plugin.exception.DuplicatedPluginException
+import org.platestack.api.plugin.exception.MissingDependenciesException
+import org.platestack.api.plugin.exception.PluginLoadingException
 import org.platestack.api.plugin.version.Version
 import org.platestack.api.plugin.version.VersionRange
 import org.platestack.api.server.PlateServer
 import org.platestack.api.server.PlateStack
 import org.platestack.api.server.PlatformNamespace
 import org.platestack.api.server.internal.InternalAccessor
+import org.platestack.common.plugin.dependency.DependencyResolution
 import org.platestack.structure.immutable.toImmutableHashSet
 import org.platestack.structure.immutable.toImmutableList
 import java.io.File
@@ -335,6 +340,9 @@ class CommonLoader: PlateLoader() {
             }
         } }
 
+        // Remove scala's delegations to scala modules
+        classesToLoad.keys.removeIf { classesToLoad["$it$"] == classesToLoad[it] }
+
         return classesToLoad
     }
 
@@ -382,28 +390,62 @@ class CommonLoader: PlateLoader() {
                 .toMap()
     }
 
+    @Throws(PluginLoadingException::class)
     override fun load(files: Set<URL>): List<PlatePlugin> {
-        val loadingClasses = files.asSequence()
-                .map { it to scan(it) }
-                .map { (url, classes) -> loadClasses(url, classes) }
-                .flatMap { it.asSequence() }
-                .map { (name, loading) -> name to loading }
-                .toMap()
+        // Scan valid @Plate annotated classes
+        val scanResults = files.associate { it to scan(it) }
 
-        val loadingPlugins = loadingClasses.asSequence()
-                .mapNotNull { it.value }
-                .associate { it.metadata.id to it }
+        // Finds duplications and associates the results by the plugin id
+        data class RegisteredPlugin(val metadata: PlateMetadata, val url: URL, val className: String)
 
-        val order = PlateStack.internal.resolveOrder(loadingClasses.values.mapNotNull { it?.metadata })
+        val pluginNames = mutableMapOf<String, RegisteredPlugin>()
+        scanResults.forEach { url, validClasses ->
+            validClasses.forEach { className, metadata ->
+                pluginNames.computeIfPresent(metadata.id) { _, registry ->
+                    throw DuplicatedPluginException(metadata.id, registry.url, url)
+                }
 
-        return order.map {
-            val data = loadingPlugins[it.id] ?: error("Could not find the plugin data for ${it.id}.\n\nOrder: $order\n\nLoading plugins: $loadingClasses\n\nLoading classes: $loadingClasses\n\nURLs: $files")
-            synchronized(this) {
-                println("Loading ${it.name} ${it.version} -- #${it.id} ${data.kClass}")
-                getOrCreateInstance(data.metadata, data.kClass)
+                pluginNames[metadata.id] = RegisteredPlugin(metadata, url, className)
             }
         }
+
+        // Resolves the dependencies
+        val dependencyResolution = DependencyResolution(pluginNames.values.map { it.metadata })
+        if(dependencyResolution.missingRequired.isNotEmpty()) {
+            throw MissingDependenciesException(dependencyResolution.missingRequired)
+        }
+
+        if(dependencyResolution.conflicts.isNotEmpty()) {
+            throw ConflictingPluginsException(dependencyResolution.conflicts)
+        }
+
+        // Defines the loading order
+        val loadingOrder = dependencyResolution.createList().let { list ->
+            list.associate {
+                it to (pluginNames[it.id] ?: error("The dependency resolution created a list which includes a plugin which is not loading.\n\nPlugin: ${it.id}\n\nList: $list\n\nLoading: ${pluginNames.values}"))
+            }
+        }
+
+        // Prepare the class loaders
+        val classLoaders = scanResults.keys.associate { it to PluginClassLoader(it, javaClass.classLoader) }
+
+        // Loads the classes (may invoke static blocks)
+        val classes = loadingOrder.entries.associate { (meta, registry) ->
+            val classLoader = classLoaders[registry.url] ?: error("The class loader for ${registry.url} should be available")
+            try {
+                meta to classLoader.loadPluginClass(meta, registry.className)
+            }
+            catch (e: ClassNotFoundException) {
+                throw PluginLoadingException((if(e.message == null) "" else e.message+". ") + "Offending file: ${registry.url} -- ${registry.metadata.name} ${registry.metadata.version} #${registry.metadata.id}")
+            }
+        }
+
+        // Instantiates the classes
+        val instances = classes.entries.associate { (meta, kClass) -> meta to getOrCreateInstance(meta, kClass) }
+
+        return instances.values.toList()
     }
+
 }
 
 fun main(args: Array<String>) {
@@ -417,13 +459,15 @@ fun main(args: Array<String>) {
                 TODO("not implemented")
             }
 
-            override fun resolveOrder(metadata: Collection<PlateMetadata>) = metadata.toList()
+            override fun resolveOrder(metadata: Collection<PlateMetadata>) = DependencyResolution(metadata).createList()
         }
     }
 
     val testFiles = arrayOf(
-            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Kotlin\\build\\libs\\001 Simple Hello World - Kotlin-0.1.0-SNAPSHOT.jar"
-            //,"D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Java\\build\\libs\\001 Simple Hello World - Java-0.1.0-SNAPSHOT.jar"
+            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Kotlin\\build\\libs\\001 Simple Hello World - Kotlin-0.1.0-SNAPSHOT.jar",
+            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Java\\build\\libs\\001 Simple Hello World - Java-0.1.0-SNAPSHOT.jar",
+            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Scala\\Gradle\\build\\libs\\001 Simple Hello World - Scala - Gradle-0.1.0-SNAPSHOT.jar",
+            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Groovy\\build\\libs\\001 Simple Hello World - Groovy-0.1.0-SNAPSHOT.jar"
     )
 
     PlateNamespace.loader = CommonLoader()

@@ -17,6 +17,8 @@
 package org.platestack.common.plugin.dependency
 
 import org.platestack.api.plugin.*
+import org.platestack.api.plugin.exception.DependencyResolutionException
+import org.platestack.api.plugin.exception.DuplicatedPluginException
 import org.platestack.api.plugin.version.Version
 import org.platestack.api.server.PlateStack
 import org.platestack.structure.immutable.ImmutableMap
@@ -68,10 +70,10 @@ private fun resolveOrder(elements: Collection<PlateMetadata>): List<PlateMetadat
             iter.forEach { transient ->
                 val path = current + transient
                 if(transient == entry)
-                    error("Impossible resolution: A circular $name dependency was detected at: $path; All elements: $elements")
+                    throw DependencyResolutionException("Impossible resolution: A circular $name dependency was detected at: $path; All elements: $elements")
 
                 if(transient.id in getOpposite(entry))
-                    error("Impossible resolution: ${transient.id} is required both BEFORE and AFTER at: $path; All elements: $elements")
+                    throw DependencyResolutionException("Impossible resolution: ${transient.id} is required both BEFORE and AFTER at: $path; All elements: $elements")
 
                 getRequired(entry)[transient.id] = transient
                 stack.push(path to getRequired(transient).values.iterator())
@@ -96,7 +98,10 @@ private fun resolveOrder(elements: Collection<PlateMetadata>): List<PlateMetadat
     return sorted.map(Entry::meta)
 }
 
-class DependencyResolution(vararg plugin: PlateMetadata) {
+class DependencyResolution @Throws(DuplicatedPluginException::class) constructor(vararg plugin: PlateMetadata) {
+    @Throws(DuplicatedPluginException::class)
+    constructor(collection: Collection<PlateMetadata>): this(*collection.toTypedArray())
+
     val missingRequired: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
     val missingOptional: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
     val conflicts: ImmutableMap<PlateMetadata, ImmutableSet<Relation>>
@@ -107,8 +112,8 @@ class DependencyResolution(vararg plugin: PlateMetadata) {
         val independents = plugin.asSequence().filter { it.relations.isEmpty() }.associate { ID(it) to it }
         val nodes = plugin.flatMap { meta -> meta.relations.map { Node(meta, ID(it), it) } }
 
-        val plugins: Map<ID, Node> = nodes.stream().collect(Collectors.toMap({ ID(it.meta) }, { it }, { a, b -> error("Duplicated nodes: $a, $b") }))
-        plugins.keys.find { PlateStack.getPlugin(it.plugin, it.namespace) != null }?.let { error("The plugin $it is already loaded!") }
+        val plugins: Map<ID, Node> = nodes.stream().collect(Collectors.toMap({ ID(it.meta) }, { it }, { a, b -> throw DuplicatedPluginException(a.meta.id, message = "Duplicated nodes: $a, $b") }))
+        plugins.keys.find { PlateStack.getPlugin(it.plugin, it.namespace) != null }?.let { throw DuplicatedPluginException(it.plugin, message = "The plugin $it is already loaded!") }
 
         nodes.forEach { node ->
             node.match = node.relative.let { (plugins[it]?.meta ?: independents[it])?.version ?: PlateStack.getPlugin(it.plugin, it.namespace)?.version }
@@ -128,6 +133,7 @@ class DependencyResolution(vararg plugin: PlateMetadata) {
         @JvmStatic private val conflict = EnumSet.of(RelationType.INCOMPATIBLE, RelationType.INCLUDED)
     }
 
+    @Throws(DependencyResolutionException::class)
     fun createList() = resolveOrder(PlateNamespace.loadedPlugins.map(PlatePlugin::metadata) + established.keys + independents)
 
     private data class Node(val meta: PlateMetadata, val relative: ID, val relation: Relation, var match: Version? = null)
