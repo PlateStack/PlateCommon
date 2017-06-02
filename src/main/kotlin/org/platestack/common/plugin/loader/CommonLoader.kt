@@ -42,9 +42,6 @@ import java.net.URL
 import java.net.URLClassLoader
 import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
-import kotlin.reflect.KClass
-import kotlin.reflect.full.findAnnotation
-import kotlin.reflect.full.isSubclassOf
 
 class CommonLoader: PlateLoader() {
     inline private fun JarInputStream.forEachEntry(action: (JarEntry) -> Unit) {
@@ -346,48 +343,27 @@ class CommonLoader: PlateLoader() {
         return classesToLoad
     }
 
-    private class PluginClassLoader(url: URL, parent: ClassLoader): URLClassLoader(arrayOf(url), parent) {
+    private class PluginDependencyClassLoader(parent: ClassLoader, val dependencies: Set<PluginClassLoader>): ClassLoader(parent) {
+        constructor(parent: ClassLoader, dependencies: Iterable<PluginClassLoader>): this(parent, dependencies.toSet())
+        override fun findClass(name: String): Class<*> {
+            dependencies.forEach { sub->
+                try {
+                    return sub.loadClass(name)
+                }
+                catch (ignored: ClassNotFoundException){}
+            }
+
+            throw ClassNotFoundException(name)
+        }
+    }
+
+    private class PluginClassLoader(parent: ClassLoader, vararg url: URL): URLClassLoader(url, parent) {
         override fun findClass(name: String): Class<*> {
             if(name.startsWith("org.platestack") || name.startsWith("net.minecraft"))
                 throw ClassNotFoundException(name)
 
             return super.findClass(name)
         }
-    }
-
-    private data class LoadingClass(val file: URL, val name: String, val classLoader: PluginClassLoader, var kClass: KClass<out PlatePlugin>, var metadata: PlateMetadata)
-
-    private fun loadClasses(file: URL, classNames: Map<String, PlateMetadata>): Map<String, LoadingClass?> {
-        if(classNames.isEmpty())
-            return emptyMap()
-
-        val pluginClass = PlatePlugin::class
-        val loader = PluginClassLoader(file, javaClass.classLoader)
-        return classNames.asSequence()
-                .map { (it, _) ->
-                    println("Loading the class $it from $file")
-                    it to loader.loadClass(it).kotlin
-                }
-                .map { (name, `class`) ->
-
-                    if(`class`.isSubclassOf(pluginClass)) {
-                        val annotation = `class`.findAnnotation<Plate>()
-                        if(annotation == null) {
-                            println("The class $`class` is not contains @Plate annotation and will not be loaded!")
-                            name to null
-                        }
-                        else {
-                            @Suppress("UNCHECKED_CAST")
-                            name to LoadingClass(file, name, loader, `class` as KClass<out PlatePlugin>, PlateMetadata(annotation))
-                        }
-                    }
-                    else {
-                        println("The class $`class` does not extends ${pluginClass.simpleName} and will not be loaded!")
-                        name to null
-                    }
-
-                }
-                .toMap()
     }
 
     @Throws(PluginLoadingException::class)
@@ -427,7 +403,68 @@ class CommonLoader: PlateLoader() {
         }
 
         // Prepare the class loaders
-        val classLoaders = scanResults.keys.associate { it to PluginClassLoader(it, javaClass.classLoader) }
+
+        /*
+        // An url is independent if
+        val independentUrls = scanResults.filter { (_, validClasses) ->
+            // all plugins in it are independents
+            dependencyResolution.independents.containsAll(validClasses.values) ||
+                    // or all plugins in it depends only on plugins that are included in this url (may include platform dependencies)
+                    validClasses.values.all { meta->
+                        dependencyResolution.established[meta]?.all { relation ->
+                            relation.namespace != "plate" || validClasses.values.any { it.id == relation.id }
+                        } ?: true
+                    }
+        }
+        */
+
+        val topClassLoader = javaClass.classLoader
+
+        val urlDependencies = scanResults.asSequence().map { (url, validClasses) ->
+            url to validClasses.values.asSequence().flatMap{
+                dependencyResolution.established[it]?.asSequence()
+                        ?.filter { it.namespace == "plate"}
+                        ?.map { pluginNames[it.id]!!.url }
+                        ?: emptySequence()
+            }.toSet()
+        }.toMap()
+
+        val independentUrls = urlDependencies.entries.asSequence().filter { (url, dependencies) ->
+            dependencies.isEmpty() || dependencies == setOf(url)
+        }.map { it.key }.toSet()
+
+
+        val cyclicUrls: Map<URL, Set<URL>> = urlDependencies.mapValues { (url, dependencies) ->
+            dependencies.filterTo(mutableSetOf()) {
+                it != url && url in urlDependencies[it]!!
+            }
+        }.filterNot { it.value.isEmpty() }
+
+        val normalDependencyUrls: Map<URL, Set<URL>> = urlDependencies.filter { it.key !in independentUrls }.mapValues { (url, dependencies) ->
+            dependencies.filterTo(mutableSetOf()) {
+                it != url && cyclicUrls[it]?.contains(it) != true
+            }
+        }
+
+        val classLoaders = independentUrls.associateTo(mutableMapOf()) { it to PluginClassLoader(topClassLoader, it) }
+
+        fun getClassLoader(url: URL): PluginClassLoader {
+            classLoaders[url]?.let { return it }
+
+            val parent = normalDependencyUrls[url]?.let { dependencies ->
+                PluginDependencyClassLoader(topClassLoader, dependencies.map { getClassLoader(it) })
+            } ?: topClassLoader
+
+            val classLoader = cyclicUrls[url]
+                    ?.let { cyclic -> classLoaders.entries.find { it.key in cyclic }?.value ?: PluginClassLoader(parent, *cyclic.toTypedArray()) }
+                    ?: PluginClassLoader(parent, url)
+
+            classLoaders[url] = classLoader
+            return classLoader
+        }
+
+        normalDependencyUrls.keys.associate { it to getClassLoader(it) }
+        cyclicUrls.keys.associate { it to getClassLoader(it) }
 
         // Loads the classes (may invoke static blocks)
         val classes = loadingOrder.entries.associate { (meta, registry) ->
