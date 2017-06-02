@@ -33,6 +33,7 @@ import org.platestack.api.server.PlateStack
 import org.platestack.api.server.PlatformNamespace
 import org.platestack.api.server.internal.InternalAccessor
 import org.platestack.common.plugin.dependency.DependencyResolution
+import org.platestack.structure.immutable.immutableListOf
 import org.platestack.structure.immutable.toImmutableHashSet
 import org.platestack.structure.immutable.toImmutableList
 import java.io.File
@@ -44,6 +45,8 @@ import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
 
 class CommonLoader: PlateLoader() {
+    override var loadingOrder = immutableListOf<String>(); private set
+
     inline private fun JarInputStream.forEachEntry(action: (JarEntry) -> Unit) {
         while (null != nextJarEntry?.also(action)) {
             // Action already executed
@@ -402,22 +405,9 @@ class CommonLoader: PlateLoader() {
             }
         }
 
+        this.loadingOrder = loadingOrder.keys.asSequence().map { it.id }.toImmutableList()
+
         // Prepare the class loaders
-
-        /*
-        // An url is independent if
-        val independentUrls = scanResults.filter { (_, validClasses) ->
-            // all plugins in it are independents
-            dependencyResolution.independents.containsAll(validClasses.values) ||
-                    // or all plugins in it depends only on plugins that are included in this url (may include platform dependencies)
-                    validClasses.values.all { meta->
-                        dependencyResolution.established[meta]?.all { relation ->
-                            relation.namespace != "plate" || validClasses.values.any { it.id == relation.id }
-                        } ?: true
-                    }
-        }
-        */
-
         val topClassLoader = javaClass.classLoader
 
         val urlDependencies = scanResults.asSequence().map { (url, validClasses) ->
@@ -478,9 +468,12 @@ class CommonLoader: PlateLoader() {
         }
 
         // Instantiates the classes
-        val instances = classes.entries.associate { (meta, kClass) -> meta to getOrCreateInstance(meta, kClass) }
+        val instances = classes.entries.map { (meta, kClass) -> getOrCreateInstance(meta, kClass) }
 
-        return instances.values.toList()
+        // Enable the plugins
+        instances.forEach { enable(it) }
+
+        return instances
     }
 
 }
