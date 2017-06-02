@@ -463,8 +463,8 @@ class CommonLoader: PlateLoader() {
             return classLoader
         }
 
-        normalDependencyUrls.keys.associate { it to getClassLoader(it) }
-        cyclicUrls.keys.associate { it to getClassLoader(it) }
+        normalDependencyUrls.keys.forEach { getClassLoader(it) }
+        cyclicUrls.keys.forEach { getClassLoader(it) }
 
         // Loads the classes (may invoke static blocks)
         val classes = loadingOrder.entries.associate { (meta, registry) ->
