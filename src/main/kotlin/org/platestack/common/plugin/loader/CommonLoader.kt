@@ -17,15 +17,19 @@
 package org.platestack.common.plugin.loader
 
 import com.google.gson.JsonObject
+import mu.KLogger
+import mu.KotlinLogging
 import org.objectweb.asm.*
 import org.platestack.api.message.Text
 import org.platestack.api.message.Translator
 import org.platestack.api.plugin.*
+import org.platestack.api.plugin.annotation.Library
 import org.platestack.api.plugin.annotation.Plate
 import org.platestack.api.plugin.exception.ConflictingPluginsException
 import org.platestack.api.plugin.exception.DuplicatedPluginException
 import org.platestack.api.plugin.exception.MissingDependenciesException
 import org.platestack.api.plugin.exception.PluginLoadingException
+import org.platestack.api.plugin.version.MavenArtifact
 import org.platestack.api.plugin.version.Version
 import org.platestack.api.plugin.version.VersionRange
 import org.platestack.api.server.PlateServer
@@ -33,19 +37,30 @@ import org.platestack.api.server.PlateStack
 import org.platestack.api.server.PlatformNamespace
 import org.platestack.api.server.internal.InternalAccessor
 import org.platestack.common.plugin.dependency.DependencyResolution
+import org.platestack.libraryloader.ivy.LibraryResolver
 import org.platestack.structure.immutable.immutableListOf
+import org.platestack.structure.immutable.immutableSetOf
 import org.platestack.structure.immutable.toImmutableHashSet
 import org.platestack.structure.immutable.toImmutableList
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.lang.reflect.Modifier
 import java.net.URL
 import java.net.URLClassLoader
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
+import kotlin.streams.asSequence
 
-class CommonLoader: PlateLoader() {
+class CommonLoader(logger: KLogger): PlateLoader(logger) {
     override var loadingOrder = immutableListOf<String>(); private set
+
+    public override fun setAPI(metadata: PlateMetadata) {
+        super.setAPI(metadata)
+    }
 
     inline private fun JarInputStream.forEachEntry(action: (JarEntry) -> Unit) {
         while (null != nextJarEntry?.also(action)) {
@@ -60,14 +75,19 @@ class CommonLoader: PlateLoader() {
         val versionRange = Type.getDescriptor(org.platestack.api.plugin.annotation.VersionRange::class.java)!!
         val relation = Type.getDescriptor(org.platestack.api.plugin.annotation.Relation::class.java)!!
         val relationType = Type.getDescriptor(RelationType::class.java)!!
+        val library = Type.getDescriptor(Library::class.java)!!
     }
-    private object Abort: Throwable()
 
-    private class PlateAnnotationVisitor(private val callback: (PlateMetadata) -> Unit) : AnnotationVisitor(Opcodes.ASM5) {
+    private class PlateAnnotationVisitor(private val classVersion: Int, private val callback: (PlateMetadata) -> Unit) : AnnotationVisitor(Opcodes.ASM5) {
         var id: String? = null
         var name: String? = null
         var version: Version? = null
         val relations = mutableListOf<Relation>()
+        val libraries = mutableListOf<MavenArtifact>()
+        var groovy = ""
+        var scala = ""
+        var kotlin = ""
+        var jdk = ""
         override fun visit(name: String, value: Any) {
             if(value !is String)
                 return
@@ -75,6 +95,10 @@ class CommonLoader: PlateLoader() {
             when(name) {
                 "id" -> id = value
                 "name" -> this.name = value
+                "groovy" -> groovy = value
+                "scala" -> scala = value
+                "kotlin" -> kotlin = value
+                "jdk" -> jdk = value
             }
         }
 
@@ -85,17 +109,42 @@ class CommonLoader: PlateLoader() {
         }
 
         override fun visitArray(name: String): AnnotationVisitor? {
-            if(name == "relations")
-                return RelationArrayAnnotationVisitor { relations += it }
+            when(name) {
+                "relations" -> RelationArrayAnnotationVisitor { relations += it }
+                "requires" -> LibraryArrayAnnotationVisitor { libraries += it }
+            }
             return null
         }
 
         override fun visitEnd() {
+            if(jdk.isBlank()) {
+                val version =  if(classVersion < 52) 52 else classVersion
+                jdk = "1."+(version - 44)
+            }
+
+            if(groovy.isNotBlank()) {
+                libraries += MavenArtifact("org.codehaus.groovy", "groovy-all", groovy)
+            }
+
+            if(scala.isNotBlank()) {
+                libraries += MavenArtifact("org.scala-lang", "scala-library-all", scala)
+            }
+
+            if(kotlin.isNotBlank()) {
+                libraries += MavenArtifact("org.jetbrains.kotlin", "kotlin-stdlib", kotlin)
+            }
+
+            if(relations.none { it.namespace == "plate" && it.id == "platestack" }) {
+                relations += Relation(RelationType.REQUIRED_AFTER, "platestack", "plate", immutableListOf(VersionRange()))
+            }
+
             val data = PlateMetadata(
                     checkNotNull(id) { "The @Plate annotation does not defines an ID" },
                     checkNotNull(name) { "The @Plate annotation does not defines a name "},
                     checkNotNull(version) { "The @Plate annotation does not defines a version" },
-                    relations.toImmutableList()
+                    jdk,
+                    relations.toImmutableList(),
+                    libraries.toImmutableList()
             )
             callback(data)
         }
@@ -138,6 +187,30 @@ class CommonLoader: PlateLoader() {
             else
                 version = Version(major, minor, patch, label.toImmutableList(), metadata)
             callback(version)
+        }
+    }
+
+    private class LibraryAnnotationVisitor(private val callback: (MavenArtifact) -> Unit): AnnotationVisitor(Opcodes.ASM5) {
+        var group: String? = null
+        var artifact: String? = null
+        var version: String? = null
+
+        override fun visit(name: String, value: Any) {
+            if(value is String) {
+                when(name) {
+                    "group" -> group = value
+                    "artifact" -> artifact = value
+                    "version" -> version = value
+                }
+            }
+        }
+
+        override fun visitEnd() {
+            callback(MavenArtifact(
+                    checkNotNull(group) { "A @Library annotation is missing the group parameter" },
+                    checkNotNull(artifact) { "A @Library annotation is missing the artifact parameter" },
+                    checkNotNull(version) { "A @Library annotation is missing the version parameter" }
+            ))
         }
     }
 
@@ -270,6 +343,20 @@ class CommonLoader: PlateLoader() {
         }
     }
 
+    private class LibraryArrayAnnotationVisitor(private val callback: (List<MavenArtifact>) -> Unit): AnnotationVisitor(Opcodes.ASM5) {
+        private val values = mutableListOf<MavenArtifact>()
+
+        override fun visitAnnotation(name: String?, desc: String): AnnotationVisitor? {
+            if(desc == Descriptor.library)
+                return LibraryAnnotationVisitor { values += it }
+            return null
+        }
+
+        override fun visitEnd() {
+            callback(values)
+        }
+    }
+
     private class RelationArrayAnnotationVisitor(private val callback: (List<Relation>) -> Unit): AnnotationVisitor(Opcodes.ASM5) {
         private val values = mutableListOf<Relation>()
 
@@ -299,19 +386,21 @@ class CommonLoader: PlateLoader() {
         var className: String? = null
         var metadata: PlateMetadata? = null
         var public = false
+        var version = 0
 
         init {
             reader.accept(this, 0)
         }
 
         override fun visit(version: Int, access: Int, name: String?, signature: String?, superName: String?, interfaces: Array<out String>?) {
+            this.version = version
             className = name
             public = Modifier.isPublic(access)
         }
 
         override fun visitAnnotation(desc: String, visible: Boolean): AnnotationVisitor? {
             if(desc == Descriptor.plate)
-                return PlateAnnotationVisitor { metadata = it }
+                return PlateAnnotationVisitor(version) { metadata = it }
             return null
         }
 
@@ -321,20 +410,15 @@ class CommonLoader: PlateLoader() {
     }
 
     @Throws(IOException::class)
-    private fun scan(file: URL): Map<String, PlateMetadata> {
+    override fun scan(file: URL): Map<String, PlateMetadata> {
         val classesToLoad = mutableMapOf<String, PlateMetadata>()
         file.openStream().use { JarInputStream(it).use { input ->
             input.forEachEntry { entry ->
                 if(!entry.isDirectory && entry.name.endsWith(".class", ignoreCase = true)) {
-                    try {
-                        ValidPluginClassVisitor(ClassReader(input)) { public, className, metadata ->
-                            if (public && metadata != null && className == entry.name.let { it.substring(0, it.length-6) }) {
-                                classesToLoad[Type.getType("L$className;").className] = metadata
-                            }
+                    ValidPluginClassVisitor(ClassReader(input)) { public, className, metadata ->
+                        if (public && metadata != null && className == entry.name.let { it.substring(0, it.length-6) }) {
+                            classesToLoad[Type.getType("L$className;").className] = metadata
                         }
-                    }
-                    catch (ignored: Abort) {
-                        // We just want to read the annotations and the class header, not the entire class.
                     }
                 }
             }
@@ -371,11 +455,26 @@ class CommonLoader: PlateLoader() {
 
     @Throws(PluginLoadingException::class)
     override fun load(files: Set<URL>): List<PlatePlugin> {
+        data class RegisteredPlugin(val metadata: PlateMetadata, val url: URL, val className: String)
+        val api = PlateNamespace.api.run { RegisteredPlugin(metadata, javaClass.protectionDomain.codeSource.location, javaClass.name) }
+
         // Scan valid @Plate annotated classes
-        val scanResults = files.associate { it to scan(it) }
+        val scanResults = files.associate { it to scan(it) } + mapOf(api.url to mapOf(api.className to api.metadata))
+        logger.info {
+            if(scanResults.isEmpty()) {
+                "No plugins were found"
+            } else {
+                "The scanner found the following plugins:\n---------------\n" +
+                scanResults.entries.map { (url, validClasses) ->
+                    val fileName = Paths.get(url.toURI()).fileName
+                    validClasses.values
+                            .map { "Found: ${it.name} ${it.version} -- #${it.id} inside $fileName" }
+                            .joinToString("\n")
+                }.joinToString("\n---------------\n")
+            }
+        }
 
         // Finds duplications and associates the results by the plugin id
-        data class RegisteredPlugin(val metadata: PlateMetadata, val url: URL, val className: String)
 
         val pluginNames = mutableMapOf<String, RegisteredPlugin>()
         scanResults.forEach { url, validClasses ->
@@ -405,11 +504,15 @@ class CommonLoader: PlateLoader() {
             }
         }
 
+        logger.debug { "The plugins will load in this order:"+loadingOrder.keys.joinToString("\n -", "\n -") }
+
         this.loadingOrder = loadingOrder.keys.asSequence().map { it.id }.toImmutableList()
 
-        // Prepare the class loaders
-        val topClassLoader = javaClass.classLoader
+        // Computes the URL dependencies
 
+        /**
+         * A map of URLs to all URLs that it depends
+         */
         val urlDependencies = scanResults.asSequence().map { (url, validClasses) ->
             url to validClasses.values.asSequence().flatMap{
                 dependencyResolution.established[it]?.asSequence()
@@ -417,37 +520,202 @@ class CommonLoader: PlateLoader() {
                         ?.map { pluginNames[it.id]!!.url }
                         ?: emptySequence()
             }.toSet()
-        }.toMap()
+        }.toMap() + mapOf(pluginNames["platestack"]!!.url to emptySet())
 
+        /**
+         * A set of all URLs which does not depends on other URLs
+         */
         val independentUrls = urlDependencies.entries.asSequence().filter { (url, dependencies) ->
             dependencies.isEmpty() || dependencies == setOf(url)
         }.map { it.key }.toSet()
 
 
+        /**
+         * URLs which depends on other URLs that also depends on the first URL.
+         *
+         * Example:
+         * * A depends on B and B depends on A
+         * * A depends on B, B depends on C, C depends on A
+         *
+         * The map key in a cyclic URL and the value are all URLs which are part of the cyclic
+         */
         val cyclicUrls: Map<URL, Set<URL>> = urlDependencies.mapValues { (url, dependencies) ->
             dependencies.filterTo(mutableSetOf()) {
                 it != url && url in urlDependencies[it]!!
             }
         }.filterNot { it.value.isEmpty() }
 
+        /**
+         * URLs which depends on other URLs which may depends on other but does not causes a cyclic dependency
+         */
         val normalDependencyUrls: Map<URL, Set<URL>> = urlDependencies.filter { it.key !in independentUrls }.mapValues { (url, dependencies) ->
             dependencies.filterTo(mutableSetOf()) {
                 it != url && cyclicUrls[it]?.contains(it) != true
             }
         }
 
+        fun URL.openEntryStream(filePath: Path): InputStream? {
+            val stream = openStream()
+            fun InputStream.tryToClose(suppressTo: Throwable) {
+                try {
+                    close()
+                }
+                catch (e: Throwable) {
+                    suppressTo.addSuppressed(e)
+                }
+            }
+
+            try {
+                try {
+                    val jar = JarInputStream(stream)
+                    jar.forEachEntry { entry ->
+                        if (Paths.get(entry.name) == filePath) {
+                            return jar
+                        }
+                    }
+                }
+                catch (jarIO: IOException) {
+                    stream.tryToClose(jarIO)
+
+                    val sub = URL(this, filePath.toString())
+                    try {
+                        return sub.openStream()
+                    } catch (e: Throwable) {
+                        jarIO.addSuppressed(e)
+                        throw jarIO
+                    }
+                }
+
+                stream.close()
+                return null
+            } catch (e: Throwable) {
+                stream.tryToClose(e)
+                throw e
+            }
+        }
+
+        fun MavenArtifact.toIvy() = org.platestack.libraryloader.ivy.MavenArtifact(group, artifact, version)
+        fun org.platestack.libraryloader.ivy.MavenArtifact.toPlugin() = MavenArtifact(group, artifact, version)
+
+        val cachedLibraries = mutableMapOf<URL, Set<MavenArtifact>>()
+        fun getRequiredLibraries(url: URL): MutableSet<MavenArtifact> {
+            cachedLibraries[url]?.let { return it.toMutableSet() }
+
+            val containedPlugins = scanResults[url]!!.values
+            val librariesList: List<MavenArtifact> = url.openEntryStream(Paths.get("libraries.list"))
+                    ?.use { input: InputStream -> LibraryResolver.readArtifacts(input).map { it.toPlugin() } }
+                    ?: emptyList()
+
+            val requiredLibraries = containedPlugins.flatMapTo(mutableSetOf<MavenArtifact>()) { it.libraries }
+            requiredLibraries += librariesList
+
+            logger.info { "Getting transitive dependencies for libraries required by "+Paths.get(url.toURI()).fileName+":"+requiredLibraries.joinToString("\n - ", "\n - ") }
+            val dependencies = LibraryResolver.getInstance().dependencies(
+                    MavenArtifact(
+                            "org.platestack.runtime.resolver.lib.transient",
+                            Paths.get(url.toURI()).fileName.toString().replace(Regex("^[a-zA-Z0-9_-]"), "_"),
+                            "runtime"
+                    ).toIvy(),
+                    requiredLibraries.map { it.toIvy() }.toSet()
+            ).mapTo(mutableSetOf()) { it.toPlugin() }.onEach {
+                logger.info { "Resolution: $it" }
+            }
+
+            cachedLibraries[url] = dependencies
+            return dependencies
+        }
+
+        // Computes the URL libraries
+        val independentLibraries: Map<URL, Set<MavenArtifact>> = independentUrls.associate {
+            it to getRequiredLibraries(it)
+        }
+
+        val normalLibraries: Map<URL, Set<MavenArtifact>> = normalDependencyUrls.entries.associate { (url, dependencies) ->
+            url to getRequiredLibraries(url).also {
+                val dependencyLibraries = dependencies.flatMap { getRequiredLibraries(it) }
+                it.removeIf { lib ->
+                    dependencyLibraries.any {
+                        it.group == lib.group && it.artifact == lib.artifact
+                    }
+                }
+                //it.addAll(dependencyLibraries)
+            }
+        }
+
+        val cyclicLibraries: Map<URL, Set<MavenArtifact>> = cyclicUrls.entries.associate { (url, cyclic) ->
+            url to getRequiredLibraries(url).also {
+                it += cyclic.flatMap { getRequiredLibraries(it) }
+                normalDependencyUrls[url]?.apply {
+                    it -= flatMap { getRequiredLibraries(it) }
+                }
+            }
+        }
+
+        val libraryUrls = independentLibraries.entries.associateTo(mutableMapOf()) { (url, libs) ->
+            logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (independent) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
+            url to LibraryResolver.getInstance().resolve(
+                    MavenArtifact("org.platestack.runtime.resolver.lib.independent", scanResults[url]!!.values.map { it.id }.joinToString("_-_"), "runtime").toIvy(),
+                    libs.map { it.toIvy() }
+            ).onEach { logger.info { "Resolution: $it" } }.map { it.toURI().toURL() }
+        }
+
+        val normalLibUrls = normalLibraries.entries.associate { (url, libs) ->
+            logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (dependent) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
+            url to LibraryResolver.getInstance().resolve(
+                    MavenArtifact("org.platestack.runtime.resolver.lib.normal", scanResults[url]!!.values.map { it.id }.joinToString("_-_"), "runtime").toIvy(),
+                    libs.map { it.toIvy() }
+            ).onEach { logger.info { "Resolution: $it" } }.map { it.toURI().toURL() }
+        }
+
+        libraryUrls += normalLibUrls
+
+        libraryUrls += cyclicLibraries.entries.associate { (url, libs) ->
+            logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (cyclic) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
+            url to LibraryResolver.getInstance().resolve(
+                    MavenArtifact("org.platestack.runtime.resolver.lib.cyclic", scanResults[url]!!.values.map { it.id }.joinToString("_-_"), "runtime").toIvy(),
+                    libs.map { it.toIvy() }
+            ).map { it.toURI().toURL() }.let {
+                it + cyclicUrls.entries.flatMap { normalLibUrls[it.key] ?: emptyList() }
+            }.onEach { logger.info { "Resolution: $it" } }
+        }
+
+        // Creates the class loaders
+
+        logger.info { "Creating class loaders..." }
+
+        /**
+         * The highest classLoader
+         */
+        val topClassLoader = javaClass.classLoader
+
+        /**
+         * A map of URL to its class loader
+         */
         val classLoaders = independentUrls.associateTo(mutableMapOf()) { it to PluginClassLoader(topClassLoader, it) }
 
+        /**
+         * Gets or creates and register a class loader for a given URL.
+         *
+         * * All cyclic URLs will share the same class loader.
+         * * URLs with normal dependencies will have a [PluginDependencyClassLoader] instead of the topClassLoader
+         */
         fun getClassLoader(url: URL): PluginClassLoader {
             classLoaders[url]?.let { return it }
 
-            val parent = normalDependencyUrls[url]?.let { dependencies ->
-                PluginDependencyClassLoader(topClassLoader, dependencies.map { getClassLoader(it) })
-            } ?: topClassLoader
+            val pluginDependencies = (cyclicUrls[url]?:setOf(url)).asSequence()
+                    .mapNotNull { normalDependencyUrls[it] }.flatMap { it.asSequence() }
+                    .map { getClassLoader(it) }
+                    .toSet()
+
+            val parent =
+                    if(pluginDependencies.isEmpty())
+                        topClassLoader
+                    else
+                        PluginDependencyClassLoader(topClassLoader, pluginDependencies)
 
             val classLoader = cyclicUrls[url]
-                    ?.let { cyclic -> classLoaders.entries.find { it.key in cyclic }?.value ?: PluginClassLoader(parent, *cyclic.toTypedArray()) }
-                    ?: PluginClassLoader(parent, url)
+                    ?.let { cyclic -> classLoaders.entries.find { it.key in cyclic }?.value ?: PluginClassLoader(parent, *(cyclic + (libraryUrls[url]?: emptyList())).toTypedArray()) }
+                    ?: PluginClassLoader(parent, *(listOf(url) + (libraryUrls[url]?:emptyList())).toTypedArray())
 
             classLoaders[url] = classLoader
             return classLoader
@@ -468,14 +736,48 @@ class CommonLoader: PlateLoader() {
         }
 
         // Instantiates the classes
-        val instances = classes.entries.map { (meta, kClass) -> getOrCreateInstance(meta, kClass) }
+        val instances = classes.entries.asSequence()
+                .filter { it.key != api.metadata }
+                .map { (meta, kClass) -> getOrCreateInstance(meta, kClass) }
+                .toList()
+
+        enable(PlateNamespace.api)
 
         // Enable the plugins
         instances.forEach { enable(it) }
 
+        logger.info { "All plate plugins have been loaded and enabled successfully" }
+
         return instances
     }
 
+    fun findPlugins(dir: Path, rename: Boolean, filter: (Path)->Boolean): Sequence<Path> {
+        return Files.list(dir).asSequence()
+                .filter { Files.isRegularFile(it) }
+                .filter(filter)
+                //.map { it to PlateNamespace.loader.scan(it.toUri().toURL()) }
+                //.filter { it.second.isNotEmpty() }
+                .run {
+                    if(rename) {
+                        map { path ->
+                            val name = path.fileName.toString()
+                            if(!name.endsWith(".plate", ignoreCase = true)) {
+                                val target = path.parent.resolve(name.replaceBeforeLast('.', ".plate", "$name.plate"))
+                                try {
+                                    val moved = Files.move(path, target)
+                                    moved
+                                }
+                                catch(e: Exception) {
+                                    System.err.println("Failed to move $path to $target")
+                                    e.printStackTrace()
+                                    path
+                                }
+                            }
+                            else path
+                        }
+                    } else this
+                }
+    }
 }
 
 fun main(args: Array<String>) {
@@ -488,8 +790,6 @@ fun main(args: Array<String>) {
             override fun toJson(text: Text): JsonObject {
                 TODO("not implemented")
             }
-
-            override fun resolveOrder(metadata: Collection<PlateMetadata>) = DependencyResolution(metadata).createList()
         }
     }
 
@@ -497,9 +797,27 @@ fun main(args: Array<String>) {
             "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Kotlin\\build\\libs\\001 Simple Hello World - Kotlin-0.1.0-SNAPSHOT.jar",
             "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Java\\build\\libs\\001 Simple Hello World - Java-0.1.0-SNAPSHOT.jar",
             "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Scala\\Gradle\\build\\libs\\001 Simple Hello World - Scala - Gradle-0.1.0-SNAPSHOT.jar",
-            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Groovy\\build\\libs\\001 Simple Hello World - Groovy-0.1.0-SNAPSHOT.jar"
+            //"D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Scala\\SBT\\target\\scala-2.12\\001-sbt-plateplugin_2.12-0.1.0-SNAPSHOT.jar",
+            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Groovy\\build\\libs\\001 Simple Hello World - Groovy-0.1.0-SNAPSHOT.jar",
+            "D:\\_InteliJ\\CleanDishes\\002 MavenPlugin\\Java\\target\\gradle\\libs\\002 MavenPlugin - Java.jar",
+            "D:\\_InteliJ\\CleanDishes\\002 MavenPlugin\\Kotlin\\target\\gradle\\libs\\002 MavenPlugin - Kotlin.jar",
+            "D:\\_InteliJ\\CleanDishes\\002 MavenPlugin\\Scala\\target\\gradle\\libs\\002 MavenPlugin - Scala.jar"
     )
 
-    PlateNamespace.loader = CommonLoader()
+    val loader = CommonLoader(KotlinLogging.logger("Test Execution"))
+    PlateNamespace.loader = loader
+
+    val resourceAsStream: InputStream = PlateServer::class.java.getResourceAsStream("/org/platestack/api/libraries.list")
+    loader.setAPI(PlateMetadata(
+            "platestack",
+            "PlateStack Test",
+            Version(0,1,0,"SNAPSHOT"),
+            "1.8",
+            immutableSetOf(),
+            LibraryResolver.readArtifacts(resourceAsStream).map {
+                MavenArtifact(it.group, it.artifact, it.version)
+            }
+    ))
+
     PlateNamespace.loader.load(testFiles.asSequence().map { File(it).toURI().toURL() }.toSet())
 }

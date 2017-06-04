@@ -46,9 +46,9 @@ class DependencyResolutionTest: Spek({
     setup()
 
     given("a, b, c where c depends on b and b depends on a") {
-        val a = PlateMetadata("a", "a", Version(1), emptyList())
-        val b = PlateMetadata("b", "b", Version(1), listOf(Relation(RelationType.REQUIRED_BEFORE,"a","plate", listOf(VersionRange()))))
-        val c = PlateMetadata("c", "c", Version(1), listOf(Relation(RelationType.REQUIRED_BEFORE,"b","plate", listOf(VersionRange()))))
+        val a = PlateMetadata("a", "a", Version(1), "1.8", emptyList())
+        val b = PlateMetadata("b", "b", Version(1), "1.8", listOf(Relation(RelationType.REQUIRED_BEFORE,"a","plate", listOf(VersionRange()))))
+        val c = PlateMetadata("c", "c", Version(1), "1.8", listOf(Relation(RelationType.REQUIRED_BEFORE,"b","plate", listOf(VersionRange()))))
         on("resolve the dependencies") {
             val resolution = DependencyResolution(a, b, c)
             it("should report no conflict") {

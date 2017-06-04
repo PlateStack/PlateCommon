@@ -1,3 +1,6 @@
 [submodule "plate-api"]
 	path = plate-api
 	url = https://github.com/PlateStack/PlateAPI.git
+[submodule "library-loader"]
+	path = library-loader
+	url = https://github.com/PlateStack/library-loader.git
