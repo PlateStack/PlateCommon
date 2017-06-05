@@ -443,7 +443,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
                 val parts = name.split(':', limit = 2)
                 MavenArtifact(parts[0], parts[1], version)
             }
-            else if(name.contains(Regex("\\W\\.\\W"))) {
+            else if(name.matches(Regex(".+\\..+"))) {
                 MavenArtifact(name.substringBeforeLast('.'), name.substringAfterLast('.'), version)
             }
             else {
@@ -597,7 +597,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
                 if(!entry.isDirectory && entry.name.endsWith(".class", ignoreCase = true)) {
                     if(entry.name.endsWith("\$module_.class", ignoreCase = true))
                         CeylonModuleClassVisitor(ClassReader(input)) {
-
+                            ceylonModules[it.name] = it
                         }
                     else
                         ValidPluginClassVisitor(ClassReader(input)) { public, className, metadata ->
@@ -628,6 +628,11 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
 
         // Removes the temporary # from jdk
         classesToLoad.iterator().forEach { it.setValue(it.value.copy(jdk = it.value.jdk.replace(Regex("^#"), ""))) }
+
+        // Removes explicit dependencies to platestack
+        classesToLoad.iterator().forEach { it.setValue(it.value.copy(libraries = it.value.libraries.removeIf {
+            it.group == "com.github.platestack" || it.group == "org.platestack"
+        })) }
 
         return classesToLoad
     }
@@ -799,6 +804,12 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         fun MavenArtifact.toIvy() = org.platestack.libraryloader.ivy.MavenArtifact(group, artifact, version)
         fun org.platestack.libraryloader.ivy.MavenArtifact.toPlugin() = MavenArtifact(group, artifact, version)
 
+        fun resolverArtifact(stage: String, url: URL, name: String = scanResults[url]!!.values.map { it.id }.joinToString("_-_")) =
+                MavenArtifact("org.platestack.runtime.resolver.$stage",
+                        name.takeIf { it.isNotBlank() } ?: "NO-PLUGINS",
+                        "runtime"
+                ).toIvy()
+
         val cachedLibraries = mutableMapOf<URL, Set<MavenArtifact>>()
         fun getRequiredLibraries(url: URL): MutableSet<MavenArtifact> {
             cachedLibraries[url]?.let { return it.toMutableSet() }
@@ -813,11 +824,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
 
             logger.info { "Getting transitive dependencies for libraries required by "+Paths.get(url.toURI()).fileName+":"+requiredLibraries.joinToString("\n - ", "\n - ") }
             val dependencies = LibraryResolver.getInstance().dependencies(
-                    MavenArtifact(
-                            "org.platestack.runtime.resolver.lib.transient",
-                            Paths.get(url.toURI()).fileName.toString().replace(Regex("^[a-zA-Z0-9_-]"), "_"),
-                            "runtime"
-                    ).toIvy(),
+                    resolverArtifact("lib.transient", url, Paths.get(url.toURI()).fileName.toString().replace(Regex("^[a-zA-Z0-9_-]"), "_")),
                     requiredLibraries.map { it.toIvy() }.toSet()
             ).mapTo(mutableSetOf()) { it.toPlugin() }.onEach {
                 logger.info { "Resolution: $it" }
@@ -856,7 +863,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         val libraryUrls = independentLibraries.entries.associateTo(mutableMapOf()) { (url, libs) ->
             logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (independent) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
             url to LibraryResolver.getInstance().resolve(
-                    MavenArtifact("org.platestack.runtime.resolver.lib.independent", scanResults[url]!!.values.map { it.id }.joinToString("_-_"), "runtime").toIvy(),
+                    resolverArtifact("lib.independent", url),
                     libs.map { it.toIvy() }
             ).onEach { logger.info { "Resolution: $it" } }.map { it.toURI().toURL() }
         }
@@ -864,7 +871,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         val normalLibUrls = normalLibraries.entries.associate { (url, libs) ->
             logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (dependent) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
             url to LibraryResolver.getInstance().resolve(
-                    MavenArtifact("org.platestack.runtime.resolver.lib.normal", scanResults[url]!!.values.map { it.id }.joinToString("_-_"), "runtime").toIvy(),
+                    resolverArtifact("lib.normal", url),
                     libs.map { it.toIvy() }
             ).onEach { logger.info { "Resolution: $it" } }.map { it.toURI().toURL() }
         }
@@ -874,7 +881,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         libraryUrls += cyclicLibraries.entries.associate { (url, libs) ->
             logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (cyclic) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
             url to LibraryResolver.getInstance().resolve(
-                    MavenArtifact("org.platestack.runtime.resolver.lib.cyclic", scanResults[url]!!.values.map { it.id }.joinToString("_-_"), "runtime").toIvy(),
+                    resolverArtifact("lib.cyclic", url),
                     libs.map { it.toIvy() }
             ).map { it.toURI().toURL() }.let {
                 it + cyclicUrls.entries.flatMap { normalLibUrls[it.key] ?: emptyList() }
@@ -999,7 +1006,8 @@ fun main(args: Array<String>) {
             "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Kotlin\\build\\libs\\001 Simple Hello World - Kotlin-0.1.0-SNAPSHOT.jar",
             "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Java\\build\\libs\\001 Simple Hello World - Java-0.1.0-SNAPSHOT.jar",
             "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Scala\\Gradle\\build\\libs\\001 Simple Hello World - Scala - Gradle-0.1.0-SNAPSHOT.jar",
-            //"D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Scala\\SBT\\target\\scala-2.12\\001-sbt-plateplugin_2.12-0.1.0-SNAPSHOT.jar",
+            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Scala\\SBT\\target\\scala-2.12\\001-sbt-plateplugin_2.12-0.1.0-SNAPSHOT.jar",
+            "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Ceylon\\modules\\com\\example\\platestack\\0.1.0-SNAPSHOT\\com.example.platestack-0.1.0-SNAPSHOT.car",
             "D:\\_InteliJ\\CleanDishes\\001 Simple Hello World\\Groovy\\build\\libs\\001 Simple Hello World - Groovy-0.1.0-SNAPSHOT.jar",
             "D:\\_InteliJ\\CleanDishes\\002 MavenPlugin\\Java\\target\\gradle\\libs\\002 MavenPlugin - Java.jar",
             "D:\\_InteliJ\\CleanDishes\\002 MavenPlugin\\Kotlin\\target\\gradle\\libs\\002 MavenPlugin - Kotlin.jar",
