@@ -963,6 +963,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
     }
 
     fun findPlugins(dir: Path, rename: Boolean, filter: (Path)->Boolean): Sequence<Path> {
+        Files.createDirectories(dir)
         return Files.list(dir).asSequence()
                 .filter { Files.isRegularFile(it) }
                 .filter(filter)
