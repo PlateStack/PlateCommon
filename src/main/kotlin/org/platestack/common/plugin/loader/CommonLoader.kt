@@ -489,7 +489,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         }
 
         val mavenArtifacts by lazy {
-            explicitMavenArtifacts + herdArtifacts.flatMap { it.toMavenCentral() }
+            explicitMavenArtifacts + herdArtifacts.map { it.toHerdMavenRepository() }
         }
     }
 
