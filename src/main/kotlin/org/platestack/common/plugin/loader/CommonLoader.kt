@@ -38,10 +38,7 @@ import org.platestack.api.server.PlatformNamespace
 import org.platestack.api.server.internal.InternalAccessor
 import org.platestack.common.plugin.dependency.DependencyResolution
 import org.platestack.libraryloader.ivy.LibraryResolver
-import org.platestack.structure.immutable.immutableListOf
-import org.platestack.structure.immutable.immutableSetOf
-import org.platestack.structure.immutable.toImmutableHashSet
-import org.platestack.structure.immutable.toImmutableList
+import org.platestack.structure.immutable.*
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -76,6 +73,10 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         val relation = Type.getDescriptor(org.platestack.api.plugin.annotation.Relation::class.java)!!
         val relationType = Type.getDescriptor(RelationType::class.java)!!
         val library = Type.getDescriptor(Library::class.java)!!
+        object Ceylon {
+            val import = "Lcom/redhat/ceylon/compiler/java/metadata/Import;"
+            val module = "Lcom/redhat/ceylon/compiler/java/metadata/Module;"
+        }
     }
 
     private class PlateAnnotationVisitor(private val classVersion: Int, private val callback: (PlateMetadata) -> Unit) : AnnotationVisitor(Opcodes.ASM5) {
@@ -119,7 +120,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         override fun visitEnd() {
             if(jdk.isBlank()) {
                 val version =  if(classVersion < 52) 52 else classVersion
-                jdk = "1."+(version - 44)
+                jdk = "#1."+(version - 44)
             }
 
             if(groovy.isNotBlank()) {
@@ -409,23 +410,224 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         }
     }
 
+    private class CeylonModuleClassVisitor(reader: ClassReader, private val callback: (CeylonModule)->Unit): ClassVisitor(Opcodes.ASM5) {
+        var module: CeylonModule? = null
+
+        init {
+            reader.accept(this, 0)
+        }
+
+        override fun visitAnnotation(desc: String, visible: Boolean): AnnotationVisitor? {
+            if(desc == Descriptor.Ceylon.module)
+                return CeylonModuleAnnotationVisitor { module = it }
+            return null
+        }
+
+        override fun visitEnd() {
+            module?.let(callback)
+        }
+    }
+
+    private data class CeylonImport(
+            val export: Boolean = false,
+            val optional: Boolean = false,
+            val name: String = "",
+            val version: String = "",
+            val namespace: String = "",
+            val nativeBackends: ImmutableList<String> = immutableListOf()
+    )
+
+    private data class HerdArtifact(val name: String, val version: String) {
+        fun toHerdMavenRepository(): MavenArtifact {
+            return if(name.contains(':')) {
+                val parts = name.split(':', limit = 2)
+                MavenArtifact(parts[0], parts[1], version)
+            }
+            else if(name.contains(Regex("\\W\\.\\W"))) {
+                MavenArtifact(name.substringBeforeLast('.'), name.substringAfterLast('.'), version)
+            }
+            else {
+                MavenArtifact(name, name, version)
+            }
+        }
+
+        fun toMavenCentral(): List<MavenArtifact> {
+            return if(name.startsWith("ceylon.")) {
+                listOf(MavenArtifact("org.ceylon-lang", name, version), toHerdMavenRepository())
+            }
+            else {
+                listOf(toHerdMavenRepository())
+            }
+        }
+    }
+
+    private data class CeylonModule(
+            val name: String, val version: String, val doc: String = "",
+            val by: ImmutableList<String> = immutableListOf(),
+            val license: String = "",
+            val dependencies: ImmutableList<CeylonImport> = immutableListOf(),
+            val nativeBackends: ImmutableList<String> = immutableListOf()
+    ) {
+        val jdk by lazy {
+            "1."+(
+                    (dependencies.find { it.namespace.isBlank() && it.name.startsWith("java.base") }
+                        ?: dependencies.find { it.namespace.isBlank() && it.name.startsWith("java.") }
+                    )?.version
+                    ?: "8"
+            )
+        }
+
+        val explicitMavenArtifacts by lazy {
+            dependencies.asSequence().filter { it.namespace == "maven" && it.name.contains(':') }.map {
+                val name = it.name.split(':', limit = 2)
+                MavenArtifact(name[0], name[1], it.version)
+            }.toList()
+        }
+
+        val herdArtifacts by lazy {
+            dependencies.asSequence().filter { it.namespace.isBlank() }.map { HerdArtifact(it.name, it.version) }.toList()
+        }
+
+        val mavenArtifacts by lazy {
+            explicitMavenArtifacts + herdArtifacts.flatMap { it.toMavenCentral() }
+        }
+    }
+
+    private class CeylonImportArrayAnnotationVisitor(callback: (List<CeylonImport>) -> Unit)
+        : ObjectArrayAnnotationVisitor<CeylonImport>(Descriptor.Ceylon.import, ::CeylonImportAnnotationVisitor, callback)
+
+    private open class ObjectArrayAnnotationVisitor<T>(
+            private val descriptor: String,
+            private val reader: ((T)->Unit)->AnnotationVisitor,
+            private val callback: (List<T>) -> Unit
+    ): AnnotationVisitor(Opcodes.ASM5) {
+        private val values = mutableListOf<T>()
+
+        override fun visitAnnotation(name: String?, desc: String): AnnotationVisitor? {
+            if(desc == descriptor)
+                return reader { values += it }
+            return null
+        }
+
+        override fun visitEnd() {
+            callback(values)
+        }
+    }
+
+    private class CeylonImportAnnotationVisitor(private val callback: (CeylonImport) -> Unit): AnnotationVisitor(Opcodes.ASM5) {
+        var export = false
+        var optional = false
+        var name = ""
+        var version = ""
+        var namespace = ""
+        var nativeBackends = emptyList<String>()
+
+        override fun visit(name: String, value: Any) {
+            if(value is String) {
+                when(name) {
+                    "name" -> this.name = value
+                    "version" -> version = value
+                    "namespace" -> namespace = value
+                }
+            } else if(value is Boolean) {
+                when(name) {
+                    "export" -> export = value
+                    "optional" -> optional = value
+                }
+            }
+        }
+
+        override fun visitArray(name: String): AnnotationVisitor? {
+            if(name == "nativeBackends")
+                return StringArrayAnnotationVisitor { nativeBackends = it }
+            return null
+        }
+
+        override fun visitEnd() {
+            val ceylonImport = CeylonImport(export, optional, name, version, namespace, nativeBackends.toImmutableList())
+            callback(ceylonImport)
+        }
+    }
+
+    private class CeylonModuleAnnotationVisitor(private val callback: (CeylonModule)->Unit): AnnotationVisitor(Opcodes.ASM5) {
+        var name: String? = null
+        var version: String? = null
+        var doc = ""
+        var by = emptyList<String>()
+        var license = ""
+        var dependencies = emptyList<CeylonImport>()
+        var nativeBackends = emptyList<String>()
+
+        override fun visit(name: String, value: Any?) {
+            if(value is String) {
+                when (name) {
+                    "name" -> this.name = value
+                    "version" -> version = value
+                    "doc" -> doc = value
+                    "license" -> license = value
+                }
+            }
+        }
+
+        override fun visitArray(name: String): AnnotationVisitor? {
+            return when (name) {
+                "by" -> StringArrayAnnotationVisitor { by = it }
+                "nativeBackends" -> StringArrayAnnotationVisitor { nativeBackends = it }
+                "dependencies" -> CeylonImportArrayAnnotationVisitor { dependencies = it }
+                else -> null
+            }
+        }
+
+        override fun visitEnd() {
+            val module = CeylonModule(
+                    requireNotNull(name) { "A Ceylon @Module annotation dos not define the name property" },
+                    requireNotNull(version) { "A Ceylon @Module annotation dos not define the version property" },
+                    doc, by.toImmutableList(), license, dependencies.toImmutableList(), nativeBackends.toImmutableList()
+            )
+            callback(module)
+        }
+    }
+
     @Throws(IOException::class)
     override fun scan(file: URL): Map<String, PlateMetadata> {
         val classesToLoad = mutableMapOf<String, PlateMetadata>()
+        val ceylonModules = mutableMapOf<String, CeylonModule>()
         file.openStream().use { JarInputStream(it).use { input ->
             input.forEachEntry { entry ->
                 if(!entry.isDirectory && entry.name.endsWith(".class", ignoreCase = true)) {
-                    ValidPluginClassVisitor(ClassReader(input)) { public, className, metadata ->
-                        if (public && metadata != null && className == entry.name.let { it.substring(0, it.length-6) }) {
-                            classesToLoad[Type.getType("L$className;").className] = metadata
+                    if(entry.name.endsWith("\$module_.class", ignoreCase = true))
+                        CeylonModuleClassVisitor(ClassReader(input)) {
+
                         }
-                    }
+                    else
+                        ValidPluginClassVisitor(ClassReader(input)) { public, className, metadata ->
+                            if (public && metadata != null && className == entry.name.let { it.substring(0, it.length-6) }) {
+                                classesToLoad[Type.getType("L$className;").className] = metadata
+                            }
+                        }
                 }
             }
         } }
 
+        // Adds ceylon dependencies as required libraries
+        ceylonModules.forEach { prefix, module ->
+            classesToLoad.iterator().forEach {
+                if(it.key.startsWith(prefix)) {
+                    it.setValue(it.value.run {
+                        copy(
+                            jdk = jdk.takeUnless { it.startsWith('#') } ?: module.jdk,
+                            libraries = libraries.addAll(module.mavenArtifacts)
+                        )
+                    })
+                }
+            }
+        }
+
         // Remove scala's delegations to scala modules
         classesToLoad.keys.removeIf { classesToLoad["$it$"] == classesToLoad[it] }
+
+        // Removes the temporary # from jdk
+        classesToLoad.iterator().forEach { it.setValue(it.value.copy(jdk = it.value.jdk.replace(Regex("^#"), ""))) }
 
         return classesToLoad
     }
