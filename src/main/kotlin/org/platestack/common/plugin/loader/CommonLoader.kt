@@ -804,11 +804,13 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         fun MavenArtifact.toIvy() = org.platestack.libraryloader.ivy.MavenArtifact(group, artifact, version)
         fun org.platestack.libraryloader.ivy.MavenArtifact.toPlugin() = MavenArtifact(group, artifact, version)
 
-        fun resolverArtifact(stage: String, url: URL, name: String = scanResults[url]!!.values.map { it.id }.joinToString("_-_")) =
-                MavenArtifact("org.platestack.runtime.resolver.$stage",
-                        name.takeIf { it.isNotBlank() } ?: "NO-PLUGINS",
-                        "runtime"
-                ).toIvy()
+        fun resolverArtifact(stage: String, url: URL, name: String? = null): org.platestack.libraryloader.ivy.MavenArtifact {
+            val artifact = name ?: scanResults[url]!!.values.map { it.id }.joinToString("_-_")
+            return MavenArtifact("org.platestack.runtime.resolver.$stage",
+                    artifact.takeIf { it.isNotBlank() } ?: "NO-PLUGINS",
+                    "runtime"
+            ).toIvy()
+        }
 
         val cachedLibraries = mutableMapOf<URL, Set<MavenArtifact>>()
         fun getRequiredLibraries(url: URL): MutableSet<MavenArtifact> {
