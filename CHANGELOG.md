@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 ### Added
+- Ceylon module support
+- External Maven library dependency resolution
+- Class loader isolation to avoid plugin incompatibility
+- Automatic download for external Maven libraries
+- JAR dependency resolution
+- Plugin dependency resolution
 - Project [plate-api] as submodule
 
 [Unreleased]: https://github.com/PlateStack/PlateBukkit/compare/v0.0.0...HEAD
