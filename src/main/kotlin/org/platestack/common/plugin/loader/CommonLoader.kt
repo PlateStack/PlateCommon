@@ -974,7 +974,7 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
                         map { path ->
                             val name = path.fileName.toString()
                             if(!name.endsWith(".plate", ignoreCase = true)) {
-                                val target = path.parent.resolve(name.replaceBeforeLast('.', ".plate", "$name.plate"))
+                                val target = path.parent.resolve(name.replaceAfterLast('.', "plate", "$name.plate"))
                                 try {
                                     val moved = Files.move(path, target)
                                     moved
