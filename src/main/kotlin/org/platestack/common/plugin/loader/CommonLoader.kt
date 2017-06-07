@@ -52,7 +52,7 @@ import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
 import kotlin.streams.asSequence
 
-class CommonLoader(logger: KLogger): PlateLoader(logger) {
+class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val transformer: Transformer): PlateLoader(logger) {
     override var loadingOrder = immutableListOf<String>(); private set
 
     public override fun setAPI(metadata: PlateMetadata) {
@@ -651,7 +651,29 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         }
     }
 
-    private class PluginClassLoader(parent: ClassLoader, vararg url: URL): URLClassLoader(url, parent) {
+    private class PluginClassLoader(parent: ClassLoader, transformer: Transformer, vararg urls: URL)
+                : TransformingClassLoader(URLClassLoader(urls, parent), transformer) {
+
+        /*
+        override fun loadClass(name: String, resolve: Boolean): Class<*> {
+            val `class` = findLoadedClass(name) ?:  try {
+                findClass(name)
+            } catch (e: ClassNotFoundException) {
+                try {
+                    top.loadClass(name)
+                } catch (e2: Throwable) {
+                    e2.addSuppressed(e)
+                    throw e2
+                }
+            }
+
+            if(resolve)
+                resolveClass(`class`)
+
+            return `class`
+        }
+        */
+
         override fun findClass(name: String): Class<*> {
             if(name.startsWith("org.platestack") || name.startsWith("net.minecraft"))
                 throw ClassNotFoundException(name)
@@ -897,12 +919,12 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
         /**
          * The highest classLoader
          */
-        val topClassLoader = javaClass.classLoader
+        val topClassLoader = parentClassLoader
 
         /**
          * A map of URL to its class loader
          */
-        val classLoaders = independentUrls.associateTo(mutableMapOf()) { it to PluginClassLoader(topClassLoader, it) }
+        val classLoaders = independentUrls.associateTo(mutableMapOf()) { it to PluginClassLoader(topClassLoader, transformer, it) }
 
         /**
          * Gets or creates and register a class loader for a given URL.
@@ -925,8 +947,8 @@ class CommonLoader(logger: KLogger): PlateLoader(logger) {
                         PluginDependencyClassLoader(topClassLoader, pluginDependencies)
 
             val classLoader = cyclicUrls[url]
-                    ?.let { cyclic -> classLoaders.entries.find { it.key in cyclic }?.value ?: PluginClassLoader(parent, *(cyclic + (libraryUrls[url]?: emptyList())).toTypedArray()) }
-                    ?: PluginClassLoader(parent, *(listOf(url) + (libraryUrls[url]?:emptyList())).toTypedArray())
+                    ?.let { cyclic -> classLoaders.entries.find { it.key in cyclic }?.value ?: PluginClassLoader(parent, transformer, *(cyclic + (libraryUrls[url]?: emptyList())).toTypedArray()) }
+                    ?: PluginClassLoader(parent, transformer, *(listOf(url) + (libraryUrls[url]?:emptyList())).toTypedArray())
 
             classLoaders[url] = classLoader
             return classLoader
@@ -1017,7 +1039,29 @@ fun main(args: Array<String>) {
             "D:\\_InteliJ\\CleanDishes\\002 MavenPlugin\\Scala\\target\\gradle\\libs\\002 MavenPlugin - Scala.jar"
     )
 
-    val loader = CommonLoader(KotlinLogging.logger("Test Execution"))
+    val loader = CommonLoader(KotlinLogging.logger("Test Execution"), Thread.currentThread().contextClassLoader, Transformer { _, _, input ->
+        val reader = ClassReader(input)
+        val writer = ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
+        val visitor = object : ClassVisitor(Opcodes.ASM5, writer) {
+            override fun visitMethod(access: Int, methodName: String, desc: String, signature: String?, exceptions: Array<out String>?): MethodVisitor? {
+                if (methodName == "onEnable") {
+                    return object : MethodVisitor(Opcodes.ASM5, super.visitMethod(access, methodName, desc, signature, exceptions)) {
+                        override fun visitLdcInsn(cst: Any) {
+                            if (cst is String) {
+                                super.visitLdcInsn(cst + " YOU HAVE BEEN HACKED!!! HAHA")
+                            } else {
+                                super.visitLdcInsn(cst)
+                            }
+                        }
+                    }
+                } else
+                    return super.visitMethod(access, methodName, desc, signature, exceptions)
+            }
+        }
+
+        reader.accept(visitor, 0)
+        writer.toByteArray()
+    })
     PlateNamespace.loader = loader
 
     val resourceAsStream: InputStream = PlateServer::class.java.getResourceAsStream("/org/platestack/api/libraries.list")
