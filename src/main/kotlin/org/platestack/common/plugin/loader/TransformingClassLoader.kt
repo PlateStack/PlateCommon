@@ -45,6 +45,11 @@ open class TransformingClassLoader(val top: ClassLoader, val transformer: Transf
     override fun findClass(name: String): Class<*> {
         val bytes = top.getResourceAsStream(name.replace('.','/')+".class")?.use { transformer(top, name, it) }
                 ?: throw ClassNotFoundException(name)
-        return defineClass(name, bytes, 0, bytes.size)
+        try {
+            return defineClass(name, bytes, 0, bytes.size)
+        }
+        catch (e: Exception) {
+            throw e
+        }
     }
 }
