@@ -45,6 +45,7 @@ import java.io.InputStream
 import java.lang.reflect.Modifier
 import java.net.URL
 import java.net.URLClassLoader
+import java.nio.file.FileSystemNotFoundException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -660,7 +661,7 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
                 findClass(name)
             } catch (e: ClassNotFoundException) {
                 try {
-                    top.loadClass(name)
+                    source.loadClass(name)
                 } catch (e2: Throwable) {
                     e2.addSuppressed(e)
                     throw e2
@@ -682,6 +683,8 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         }
     }
 
+    fun URL.toFileName() = try { Paths.get(toURI()).fileName.toString() } catch (e: FileSystemNotFoundException) { toString() }
+
     @Throws(PluginLoadingException::class)
     override fun load(files: Set<URL>): List<PlatePlugin> {
         data class RegisteredPlugin(val metadata: PlateMetadata, val url: URL, val className: String)
@@ -695,7 +698,8 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
             } else {
                 "The scanner found the following plugins:\n---------------\n" +
                 scanResults.entries.map { (url, validClasses) ->
-                    val fileName = Paths.get(url.toURI()).fileName
+                    //val fileName = url.toURI().let { u -> FileSystems.newFileSystem(u, emptyMap<String,Nothing>()).use { Paths.get(u).fileName } }
+                    val fileName = url.toFileName() //try { Paths.get(url.toURI()).fileName } catch (e: Exception) { url.toString() }
                     validClasses.values
                             .map { "Found: ${it.name} ${it.version} -- #${it.id} inside $fileName" }
                             .joinToString("\n")
@@ -827,9 +831,9 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         fun org.platestack.libraryloader.ivy.MavenArtifact.toPlugin() = MavenArtifact(group, artifact, version)
 
         fun resolverArtifact(stage: String, url: URL, name: String? = null): org.platestack.libraryloader.ivy.MavenArtifact {
-            val artifact = name ?: scanResults[url]!!.values.map { it.id }.joinToString("_-_")
+            val artifact = (name ?: scanResults[url]!!.values.map { it.id }.joinToString("_-_")).replace(Regex("[^a-zA-Z0-9._-]"), "_")
             return MavenArtifact("org.platestack.runtime.resolver.$stage",
-                    artifact.takeIf { it.isNotBlank() } ?: "NO-PLUGINS",
+                    artifact.takeIf { it.isNotBlank() }?.let { if(it.length > 30) it.substring(0, 30) else it } ?: "NO-PLUGINS",
                     "runtime"
             ).toIvy()
         }
@@ -846,9 +850,9 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
             val requiredLibraries = containedPlugins.flatMapTo(mutableSetOf<MavenArtifact>()) { it.libraries }
             requiredLibraries += librariesList
 
-            logger.info { "Getting transitive dependencies for libraries required by "+Paths.get(url.toURI()).fileName+":"+requiredLibraries.joinToString("\n - ", "\n - ") }
+            logger.info { "Getting transitive dependencies for libraries required by ${url.toFileName()}:"+requiredLibraries.joinToString("\n - ", "\n - ") }
             val dependencies = LibraryResolver.getInstance().dependencies(
-                    resolverArtifact("lib.transient", url, Paths.get(url.toURI()).fileName.toString().replace(Regex("^[a-zA-Z0-9_-]"), "_")),
+                    resolverArtifact("lib.transient", url, url.toFileName().replace(Regex("^[a-zA-Z0-9_-]"), "_")),
                     requiredLibraries.map { it.toIvy() }.toSet()
             ).mapTo(mutableSetOf()) { it.toPlugin() }.onEach {
                 logger.info { "Resolution: $it" }
@@ -885,7 +889,7 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         }
 
         val libraryUrls = independentLibraries.entries.associateTo(mutableMapOf()) { (url, libs) ->
-            logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (independent) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
+            logger.info { "Resolving library dependencies for ${url.toFileName()} (independent) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
             url to LibraryResolver.getInstance().resolve(
                     resolverArtifact("lib.independent", url),
                     libs.map { it.toIvy() }
@@ -893,7 +897,7 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         }
 
         val normalLibUrls = normalLibraries.entries.associate { (url, libs) ->
-            logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (dependent) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
+            logger.info { "Resolving library dependencies for ${url.toFileName()} (dependent) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
             url to LibraryResolver.getInstance().resolve(
                     resolverArtifact("lib.normal", url),
                     libs.map { it.toIvy() }
@@ -903,7 +907,7 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         libraryUrls += normalLibUrls
 
         libraryUrls += cyclicLibraries.entries.associate { (url, libs) ->
-            logger.info { "Resolving library dependencies for "+Paths.get(url.toURI()).fileName+" (cyclic) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
+            logger.info { "Resolving library dependencies for ${url.toFileName()} (cyclic) which includes "+(scanResults[url]?.values?: emptyList()).map { it.name }.joinToString() }
             url to LibraryResolver.getInstance().resolve(
                     resolverArtifact("lib.cyclic", url),
                     libs.map { it.toIvy() }
