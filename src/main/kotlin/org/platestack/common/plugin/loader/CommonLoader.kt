@@ -37,6 +37,8 @@ import org.platestack.api.server.PlateStack
 import org.platestack.api.server.PlatformNamespace
 import org.platestack.api.server.internal.InternalAccessor
 import org.platestack.common.plugin.dependency.DependencyResolution
+import org.platestack.common.transform.Transformer
+import org.platestack.common.transform.TransformingClassLoader
 import org.platestack.libraryloader.ivy.LibraryResolver
 import org.platestack.structure.immutable.*
 import java.io.File
@@ -652,8 +654,12 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         }
     }
 
-    private class PluginClassLoader(parent: ClassLoader, transformer: Transformer, vararg urls: URL)
-                : TransformingClassLoader(URLClassLoader(urls, parent), transformer) {
+    private class PluginClassLoader(parent: ClassLoader, val transformer: Transformer, vararg urls: URL)
+                : TransformingClassLoader(URLClassLoader(urls, parent)) {
+
+        override fun transform(source: ClassLoader, name: String, input: InputStream): ByteArray {
+            return transformer(source, name, input)
+        }
 
         /*
         override fun loadClass(name: String, resolve: Boolean): Class<*> {

@@ -14,13 +14,17 @@
  *  limitations under the License.
  */
 
-package org.platestack.common.plugin.loader
+package org.platestack.common.transform
 
-open class TransformingClassLoader(source: ClassLoader, val transformer: Transformer) : ClassLoader(source) {
+import java.io.InputStream
+
+abstract class TransformingClassLoader(source: ClassLoader) : ClassLoader(source) {
 
     init {
         checkNotNull(parent.parent) { "The source classloader must have a parent!" }
     }
+
+    protected abstract fun transform(source: ClassLoader, name: String, input: InputStream): ByteArray
 
     override fun loadClass(name: String, resolve: Boolean): Class<*> {
         synchronized(getClassLoadingLock(name)) {
@@ -57,7 +61,7 @@ open class TransformingClassLoader(source: ClassLoader, val transformer: Transfo
     }
 
     override fun findClass(name: String): Class<*> {
-        val bytes = parent.getResourceAsStream(name.replace('.','/')+".class")?.use { transformer(this, name, it) }
+        val bytes = parent.getResourceAsStream(name.replace('.','/')+".class")?.use { transform(this, name, it) }
                 ?: throw ClassNotFoundException(name)
         try {
             return defineClass(name, bytes, 0, bytes.size)

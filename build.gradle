@@ -43,10 +43,33 @@ repositories {
     maven { url 'http://dl.bintray.com/jetbrains/spek' }
 }
 
+configurations {
+    compileUtil
+    util {
+        extendsFrom compileUtil
+    }
+
+    compile.extendsFrom util
+}
+
+sourceSets {
+    util {
+        java.srcDirs = ['src/util/java']
+        kotlin.srcDirs = ['src/util/kotlin']
+        resources.srcDirs = ['src/util/resources']
+        compileClasspath = configurations.compileUtil
+    }
+}
+
 dependencies {
+    compileUtil project(path: ':plate-api', configuration: 'util')
+    compileUtil project(':library-loader')
+    compileUtil 'org.ow2.asm:asm:5.2'
+
+    util sourceSets.util.output
+
+    compile sourceSets.util.output
     compile project(':plate-api')
-    compile project(':library-loader')
-    compile 'org.ow2.asm:asm:5.2'
     runtime 'org.slf4j:slf4j-simple:1.7.25'
 
     testCompile 'org.mockito:mockito-core:1.10.19'

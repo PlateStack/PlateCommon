@@ -14,7 +14,7 @@
  *  limitations under the License.
  */
 
-package org.platestack.common.plugin.loader;
+package org.platestack.common.transform;
 
 import org.jetbrains.annotations.NotNull;
 
