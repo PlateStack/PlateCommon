@@ -16,12 +16,8 @@
 
 package org.platestack.common.plugin.loader
 
-import com.google.gson.JsonObject
 import mu.KLogger
-import mu.KotlinLogging
 import org.objectweb.asm.*
-import org.platestack.api.message.Text
-import org.platestack.api.message.Translator
 import org.platestack.api.plugin.*
 import org.platestack.api.plugin.annotation.Library
 import org.platestack.api.plugin.annotation.Plate
@@ -32,16 +28,9 @@ import org.platestack.api.plugin.exception.PluginLoadingException
 import org.platestack.api.plugin.version.MavenArtifact
 import org.platestack.api.plugin.version.Version
 import org.platestack.api.plugin.version.VersionRange
-import org.platestack.api.server.PlateServer
-import org.platestack.api.server.PlateStack
-import org.platestack.api.server.PlatformNamespace
-import org.platestack.api.server.internal.InternalAccessor
 import org.platestack.common.plugin.dependency.DependencyResolution
-import org.platestack.common.transform.Transformer
-import org.platestack.common.transform.TransformingClassLoader
 import org.platestack.libraryloader.ivy.LibraryResolver
 import org.platestack.structure.immutable.*
-import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.lang.reflect.Modifier
@@ -55,7 +44,7 @@ import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
 import kotlin.streams.asSequence
 
-class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val transformer: Transformer): PlateLoader(logger) {
+class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val pluginTransformFactory: (ClassLoader) -> ClassLoader): PlateLoader(logger) {
     override var loadingOrder = immutableListOf<String>(); private set
 
     public override fun setAPI(metadata: PlateMetadata) {
@@ -640,8 +629,8 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         return classesToLoad
     }
 
-    private class PluginDependencyClassLoader(parent: ClassLoader, val dependencies: Set<PluginClassLoader>): ClassLoader(parent) {
-        constructor(parent: ClassLoader, dependencies: Iterable<PluginClassLoader>): this(parent, dependencies.toSet())
+    private class PluginDependencyClassLoader(parent: ClassLoader, val dependencies: Set<ClassLoader>): ClassLoader(parent) {
+        constructor(parent: ClassLoader, dependencies: Iterable<ClassLoader>): this(parent, dependencies.toSet())
         override fun findClass(name: String): Class<*> {
             dependencies.forEach { sub->
                 try {
@@ -654,33 +643,7 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         }
     }
 
-    private class PluginClassLoader(parent: ClassLoader, val transformer: Transformer, vararg urls: URL)
-                : TransformingClassLoader(URLClassLoader(urls, parent)) {
-
-        override fun transform(source: ClassLoader, name: String, input: InputStream): ByteArray {
-            return transformer(source, name, input)
-        }
-
-        /*
-        override fun loadClass(name: String, resolve: Boolean): Class<*> {
-            val `class` = findLoadedClass(name) ?:  try {
-                findClass(name)
-            } catch (e: ClassNotFoundException) {
-                try {
-                    source.loadClass(name)
-                } catch (e2: Throwable) {
-                    e2.addSuppressed(e)
-                    throw e2
-                }
-            }
-
-            if(resolve)
-                resolveClass(`class`)
-
-            return `class`
-        }
-        */
-
+    private class PluginClassLoader(parent: ClassLoader, vararg urls: URL) : URLClassLoader(urls, parent) {
         override fun findClass(name: String): Class<*> {
             if(name.startsWith("org.platestack") || name.startsWith("net.minecraft"))
                 throw ClassNotFoundException(name)
@@ -934,7 +897,7 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
         /**
          * A map of URL to its class loader
          */
-        val classLoaders = independentUrls.associateTo(mutableMapOf()) { it to PluginClassLoader(topClassLoader, transformer, it) }
+        val classLoaders = independentUrls.associateTo(mutableMapOf()) { it to pluginTransformFactory(PluginClassLoader(topClassLoader, it)) }
 
         /**
          * Gets or creates and register a class loader for a given URL.
@@ -942,7 +905,7 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
          * * All cyclic URLs will share the same class loader.
          * * URLs with normal dependencies will have a [PluginDependencyClassLoader] instead of the topClassLoader
          */
-        fun getClassLoader(url: URL): PluginClassLoader {
+        fun getClassLoader(url: URL): ClassLoader {
             classLoaders[url]?.let { return it }
 
             val pluginDependencies = (cyclicUrls[url]?:setOf(url)).asSequence()
@@ -957,8 +920,8 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
                         PluginDependencyClassLoader(topClassLoader, pluginDependencies)
 
             val classLoader = cyclicUrls[url]
-                    ?.let { cyclic -> classLoaders.entries.find { it.key in cyclic }?.value ?: PluginClassLoader(parent, transformer, *(cyclic + (libraryUrls[url]?: emptyList())).toTypedArray()) }
-                    ?: PluginClassLoader(parent, transformer, *(listOf(url) + (libraryUrls[url]?:emptyList())).toTypedArray())
+                    ?.let { cyclic -> classLoaders.entries.find { it.key in cyclic }?.value ?: pluginTransformFactory(PluginClassLoader(parent, *(cyclic + (libraryUrls[url]?: emptyList())).toTypedArray())) }
+                    ?: pluginTransformFactory(PluginClassLoader(parent, *(listOf(url) + (libraryUrls[url]?:emptyList())).toTypedArray()))
 
             classLoaders[url] = classLoader
             return classLoader
@@ -1024,6 +987,7 @@ class CommonLoader(logger: KLogger, val parentClassLoader: ClassLoader, val tran
     }
 }
 
+/*
 fun main(args: Array<String>) {
     PlateStack = object : PlateServer {
         override val platformName = "test"
@@ -1088,3 +1052,4 @@ fun main(args: Array<String>) {
 
     PlateNamespace.loader.load(testFiles.asSequence().map { File(it).toURI().toURL() }.toSet())
 }
+*/
